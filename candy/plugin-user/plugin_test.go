@@ -73,3 +73,103 @@ func TestUserVerb_RenderProvisionScript(t *testing.T) {
 		t.Fatalf("act: want a useradd script, got ok=%v %q", ok, script)
 	}
 }
+
+// multiExec answers several commands, which the linger leg needs: the verb runs the
+// getent probe AND a loginctl probe in one RunVerb.
+type multiExec struct {
+	replies map[string]struct {
+		out  string
+		exit int
+	}
+}
+
+func (m *multiExec) RunCapture(_ context.Context, cmd string) (string, string, int, error) {
+	for prefix, r := range m.replies {
+		if strings.Contains(cmd, prefix) {
+			return r.out, "", r.exit, nil
+		}
+	}
+	return "", "no fake response for: " + cmd, 127, nil
+}
+func (m *multiExec) Kind() string { return "container" }
+
+func lingerExec(lingerOut string, lingerExit int) *multiExec {
+	return &multiExec{replies: map[string]struct {
+		out  string
+		exit int
+	}{
+		"getent passwd":      {"alice:x:1000:1000:Alice:/home/alice:/bin/bash\n", 0},
+		"loginctl show-user": {lingerOut, lingerExit},
+	}}
+}
+
+// linger is asserted ONLY when declared. Probing unconditionally would fail every
+// container venue, where there is no logind to ask — so an entry that does not mention
+// linger must not gain a second probe.
+func TestUserVerb_LingerNotProbedWhenUnset(t *testing.T) {
+	// No loginctl reply is registered: if the verb probes anyway it gets exit 127.
+	cc := &fakeCC{exec: &fakeExec{matchPrefix: "getent passwd 'alice'",
+		stdout: "alice:x:1000:1000:Alice:/home/alice:/bin/bash\n", exit: 0}}
+	res := verb{}.RunVerb(context.Background(), cc, &spec.Op{
+		PluginInput: map[string]any{"user": "alice"}})
+	if res.Status != kit.StatusPass {
+		t.Errorf("an entry that declares no linger was probed for it anyway: %+v", res)
+	}
+}
+
+func TestUserVerb_LingerAssert(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		out    string
+		exit   int
+		want   bool
+		status kit.Status
+	}{
+		{"enabled and wanted", "yes\n", 0, true, kit.StatusPass},
+		{"disabled and not wanted", "no\n", 0, false, kit.StatusPass},
+		{"disabled but wanted", "no\n", 0, true, kit.StatusFail},
+		{"enabled but not wanted", "yes\n", 0, false, kit.StatusFail},
+		// No logind user object is NOT the same as linger being off; reporting it as
+		// "no" would be a lie that sends the reader to the wrong fix.
+		{"loginctl cannot read the user", "", 1, true, kit.StatusFail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cc := &fakeCC{exec: lingerExec(tc.out, tc.exit)}
+			res := verb{}.RunVerb(context.Background(), cc, &spec.Op{
+				PluginInput: map[string]any{"user": "alice", "linger": tc.want}})
+			if res.Status != tc.status {
+				t.Errorf("status = %v, want %v (%s)", res.Status, tc.status, res.Message)
+			}
+		})
+	}
+}
+
+// The act renders enable-linger / disable-linger, and guards the loginctl PRESENCE so
+// the failure names what was asked for rather than a missing binary.
+func TestUserVerb_RenderProvisionScript_Linger(t *testing.T) {
+	on, _ := verb{}.RenderProvisionScript(&spec.Op{
+		PluginInput: map[string]any{"user": "alice", "linger": true}}, nil)
+	if !strings.Contains(on, "loginctl enable-linger 'alice'") {
+		t.Errorf("act does not enable linger: %s", on)
+	}
+	if !strings.Contains(on, "command -v loginctl") || !strings.Contains(on, "systemd-logind") {
+		t.Errorf("act does not name the cause when loginctl is absent: %s", on)
+	}
+	// The account must still be created; linger is additive, not a replacement.
+	if !strings.Contains(on, "useradd") {
+		t.Errorf("act lost the useradd: %s", on)
+	}
+
+	off, _ := verb{}.RenderProvisionScript(&spec.Op{
+		PluginInput: map[string]any{"user": "alice", "linger": false}}, nil)
+	if !strings.Contains(off, "loginctl disable-linger 'alice'") {
+		t.Errorf("linger: false does not disable: %s", off)
+	}
+
+	// Unset must render exactly as before — every existing user: step is unchanged.
+	plain, _ := verb{}.RenderProvisionScript(&spec.Op{
+		PluginInput: map[string]any{"user": "alice"}}, nil)
+	if strings.Contains(plain, "loginctl") {
+		t.Errorf("an entry declaring no linger gained a loginctl call: %s", plain)
+	}
+}

@@ -37,4 +37,19 @@
 	home?: string
 	// shell — optional expected login shell (assert) / `-s` flag (act).
 	shell?: string
+	// linger — whether systemd-logind keeps a user manager running for this account
+	// with no login session open. Asserted via
+	// `loginctl show-user <u> --property=Linger` (assert) / `loginctl enable-linger`
+	// (act). Tri-state pointer: UNSET asserts nothing and acts on nothing, so every
+	// existing `user:` step is unchanged.
+	//
+	// It belongs on the ACCOUNT, not on a service. Linger is a property of the user,
+	// and N services owned by one account would otherwise each carry a field that
+	// fights the others over the same single piece of state.
+	//
+	// Without it, every `scope: user` unit dies the moment the deploy's SSH session
+	// ends. charly runs linger nowhere today, and four places hand-roll it with three
+	// different failure semantics (agentteams-controller, plugin-vm/vm.go,
+	// plugin-deploy-vm/lifecycle.go, and supervisord's sentinel file).
+	linger?: bool @go(Linger,type=*bool)
 }

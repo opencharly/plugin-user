@@ -76,6 +76,30 @@ func (verb) RunVerb(ctx context.Context, cc kit.CheckContext, op *spec.Op) kit.R
 	if in.Shell != "" && shell != in.Shell {
 		return kit.Failf("shell=%s, want %s", shell, in.Shell)
 	}
+	// Linger is asserted ONLY when the step declares it: probing unconditionally would
+	// fail every container venue, where there is no logind to ask.
+	if in.Linger != nil {
+		q := fmt.Sprintf("loginctl show-user %s --property=Linger --value",
+			shellquote.ShellQuote(in.User))
+		out, _, exit, err := cc.Exec().RunCapture(ctx, q)
+		if err != nil {
+			return kit.Failf("linger probe: %v", err)
+		}
+		if exit != 0 {
+			// A user with no session has no logind user object at all; that is not the
+			// same as linger being off, and reporting it as "no" would be a lie.
+			return kit.Failf("linger: loginctl could not read user %s (exit %d) — "+
+				"no systemd-logind on this venue, or the account has never logged in",
+				in.User, exit)
+		}
+		got := strings.EqualFold(strings.TrimSpace(out), "yes")
+		if got != *in.Linger {
+			return kit.Failf("linger=%v, want %v — a scope: user unit will %s",
+				got, *in.Linger,
+				map[bool]string{true: "keep running after logout when it should not",
+					false: "die the moment the session ends"}[got])
+		}
+	}
 	return kit.Passf("uid=%d gid=%d", uid, gid)
 }
 
@@ -96,5 +120,21 @@ func (verb) RenderProvisionScript(op *spec.Op, _ []string) (string, bool) {
 		flags += " -s " + shellquote.ShellQuote(in.Shell)
 	}
 	name := shellquote.ShellQuote(in.User)
-	return fmt.Sprintf("id %[1]s >/dev/null 2>&1 || useradd%[2]s %[1]s", name, flags), true
+	script := fmt.Sprintf("id %[1]s >/dev/null 2>&1 || useradd%[2]s %[1]s", name, flags)
+	if in.Linger != nil {
+		// enable-linger/disable-linger are both idempotent, so this needs no guard of
+		// its own. The loginctl PRESENCE check does need one: without it the step fails
+		// with a bare "loginctl: not found", which names the missing tool rather than
+		// the thing the author asked for.
+		sub := "enable-linger"
+		if !*in.Linger {
+			sub = "disable-linger"
+		}
+		script += fmt.Sprintf(
+			"\nif ! command -v loginctl >/dev/null 2>&1; then "+
+				"echo \"user %[1]s: linger was requested but loginctl is absent — this venue "+
+				"has no systemd-logind, so a scope: user unit cannot survive logout here\" >&2; "+
+				"exit 1; fi\nloginctl %[2]s %[1]s", name, sub)
+	}
+	return script, true
 }
