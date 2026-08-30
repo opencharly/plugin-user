@@ -46,6 +46,26 @@ type UserInput struct {
 	// shell — optional expected login shell (assert) / `-s` flag (act).
 	Shell string `yaml:"shell,omitempty" json:"shell,omitempty"`
 
+	// groups — group names the account MUST belong to, read from `id -nG <user>`
+	// (primary + supplementary). ASSERT ONLY, like `gid`: the act form does not create
+	// memberships, because a `user:` install step that silently added a user to `wheel`
+	// or `docker` would be a privilege grant hiding inside an account declaration.
+	//
+	// An exact-name SET, deliberately NOT a matcher list. A matcher runs against the
+	// whole subject, so `contains: docker` would also match `docker-users` and
+	// `contains: wheel` would match `wheel-admins` — the same substring trap that made
+	// four `mount: opt: {contains: "subvol=/@"}` checks pass against `@home`, `@log` and
+	// `@pkg`. Membership is a set question, so this is a set.
+	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
+
+	// not_groups — group names the account must NOT belong to. A separate field rather
+	// than a negative matcher, for the same exactness reason above, and because what it
+	// exists for is a SECURITY posture worth stating directly: the `docker` group is
+	// root-equivalent (a member can `docker run -v /:/host` its way to passwordless
+	// root), so "the desktop user is not in docker" is an assertion a hardened image
+	// should be able to make about itself.
+	NotGroups []string `yaml:"not_groups,omitempty" json:"not_groups,omitempty"`
+
 	// linger — whether systemd-logind keeps a user manager running for this account
 	// with no login session open. Asserted via
 	// `loginctl show-user <u> --property=Linger` (assert) / `loginctl enable-linger`
