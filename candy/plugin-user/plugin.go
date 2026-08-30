@@ -76,6 +76,39 @@ func (verb) RunVerb(ctx context.Context, cc kit.CheckContext, op *spec.Op) kit.R
 	if in.Shell != "" && shell != in.Shell {
 		return kit.Failf("shell=%s, want %s", shell, in.Shell)
 	}
+	// Group membership is asserted only when the step declares it. One `id -nG` call
+	// serves both directions, so a step asserting presence AND absence costs one probe.
+	//
+	// EXACT set membership, never a substring test: `grep -w docker` matches
+	// `docker-users`, and the whole point of not_groups is a security posture, so a
+	// near-miss that reads as a pass is the worst possible failure mode here.
+	if len(in.Groups) > 0 || len(in.NotGroups) > 0 {
+		q := fmt.Sprintf(`id -nG %s`, shellquote.ShellQuote(in.User))
+		out, _, exit, err := cc.Exec().RunCapture(ctx, q)
+		if err != nil {
+			return kit.Failf("groups probe: %v", err)
+		}
+		if exit != 0 {
+			return kit.Failf("groups: `id -nG %s` exited %d — the account resolves in "+
+				"passwd but has no resolvable groups", in.User, exit)
+		}
+		have := map[string]bool{}
+		for _, g := range strings.Fields(out) {
+			have[g] = true
+		}
+		for _, want := range in.Groups {
+			if !have[want] {
+				return kit.Failf("groups: %s is not in %q (has: %s)",
+					in.User, want, strings.Join(strings.Fields(out), " "))
+			}
+		}
+		for _, deny := range in.NotGroups {
+			if have[deny] {
+				return kit.Failf("not_groups: %s IS in %q, which the step forbids (has: %s)",
+					in.User, deny, strings.Join(strings.Fields(out), " "))
+			}
+		}
+	}
 	// Linger is asserted ONLY when the step declares it: probing unconditionally would
 	// fail every container venue, where there is no logind to ask.
 	if in.Linger != nil {
